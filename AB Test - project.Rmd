@@ -1,0 +1,306 @@
+---
+title: "Project AB test - Guillem Bonilla"
+output: html_notebook
+---
+
+```{r}
+library('data.table')
+library("ggplot2")
+library("pwr")
+library(tidyverse)
+```
+## Exploratory Analysis
+
+```{r}
+df <- fread("views_leads_pre.csv")[date > '2019-03-24',]
+```
+
+### Metrics
+
+* Convertion Rate
+* Number of page views per user
+* Number of leads per user
+* Daily Active Users (DAU)
+* Second Day Return Rate (*)
+
+
+#### Convertion Rate
+
+```{r}
+cr <- sum(df[, numLeads])/sum(df[, numViews])
+cr
+```
+
+#### Daily Convertion Rate
+
+```{r}
+cr_daily_df <-  df[, .(numLeads = sum(numLeads), numViews=sum(numViews)), by=date]
+cr_daily_df[, cr := numLeads/numViews]
+ggplot(data=cr_daily_df, aes(x=date, y=cr, group=1)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept=cr, linetype="dashed", color = "red") +
+  labs(x = "Date", y = "Conversion Rate", 
+       title = "Daily Conversion Rate", 
+       subtitle = paste("Total Conv. Rate = ", round(100*cr,2),"%")) +
+  theme_light()
+```
+
+#### Number of active users
+
+```{r}
+users <- length(df[, unique(cookie)])
+users
+```
+
+
+```{r}
+users_daily_df <- df[, .(users=length(unique(cookie))), by=date]
+users_daily_df
+```
+
+```{r}
+ggplot(data=users_daily_df, aes(x=date, y=users, group=1)) +
+  geom_line() +
+  geom_point() +
+  theme_light()
+```
+
+#### Number of page views per user
+
+```{r}
+sum(df[, numViews])/users
+```
+
+#### Unique users report
+
+* Number of page view per user 
+* Number of leads per user
+* Conversion rate per user
+
+```{r}
+(users = df %>% distinct(cookie, .keep_all = TRUE) %>% select(date, numLeads, numViews) %>% 
+  mutate(ConvRate = ifelse(numViews>0, numLeads/numViews, 0)))
+```
+
+```{r}
+# Number of page view per user -- another way to compute it
+mean(users$numViews)
+
+# Number of leads per user
+mean(users$numLeads)
+
+# Conversion rate per user
+mean(users$ConvRate)
+```
+
+#### Daily report
+
+Daily report of views, leads and conversion rate
+
+```{r}
+(daily = df %>% distinct(cookie, .keep_all = TRUE) %>% 
+   select(date, numLeads, numViews) %>% 
+   mutate(ConvRate = ifelse(numViews>0, numLeads/numViews, 0)) %>%
+   group_by(date) %>%
+   summarise(Leads = sum(numLeads), Views = sum(numViews), CR = mean(ConvRate)))
+```
+
+```{r}
+mean(daily$Views)
+mean(daily$CR)
+```
+
+
+#### Daily Active Users (DAU)
+
+```{r}
+(DAU = df %>% filter(numViews > 0 | numLeads > 0) %>%
+  distinct(cookie, .keep_all = TRUE) %>%
+  group_by(date) %>% summarise(DAU = length(cookie)))
+```
+
+```{r}
+mean(DAU$DAU)
+```
+
+
+```{r}
+ggplot(data=DAU, aes(x=date, y=DAU, group=1)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = mean(DAU$DAU), linetype = "dashed", color = "red") +
+  labs(x = "Date", y = "Active Users", 
+       title = "Daily Active Users (DAU)", 
+       subtitle = paste("DAU = ", round(mean(DAU$DAU),2))) +
+  theme_light()
+```
+
+### Sample size determination
+
+```{r}
+p <- cr 
+s <- sqrt(p*(1-p))
+improve_by <- 0.05
+diff <- cr * improve_by
+diff # This is the true differences between the means
+
+power.t.test(delta = diff, sd = s, sig.level = 0.05, power = 0.8, type = "two.sample")
+```
+
+```{r}
+# An alternative way to run the test
+pwr.t.test(d=diff/s, sig.level = 0.05, power=0.8)
+```
+
+```{r}
+cr_daily_df[, .(date, numViews)]
+```
+
+We need at least 2 days
+
+
+## AB Test Analysis
+
+```{r}
+df_ab <- fread("views_leads_ab.csv")[date >= '2019-04-07' & date <= '2019-04-13',]
+df_ab
+```
+
+The AB Test was running from 2019-04-07 through 2019-04-13. We have selected the coresponging rows of data.
+
+```{r}
+############################################
+### FUNCTIONS TO COMPUTE POOLED P-VALUES ###
+############################################
+
+p_value = function(z_score, side = 1){
+  
+  # side = 0: if null hypotesis successes_control == successes_treatment (P-VALUE)
+  # side = 1: if null hypothesis successes_control >= successes_treatment (POWER)
+  # side = -1: if null hypothesis successes_control <= successes_treatment
+  
+  cum_dist = pnorm(z_score)
+  if (side == 1)
+    return(1 - cum_dist)
+  else if (side == -1)
+    return(cum_dist)
+  else
+    return(2*min(1 - cum_dist, cum_dist))
+}
+
+
+pooled_two_proportions_zscore = function(size_control, size_treatment, successes_control, successes_treatment){
+  p_control = successes_control/size_control
+  p_treatment = successes_treatment/size_treatment
+  p_pooled = (successes_control + successes_treatment) / (size_control + size_treatment)
+  sd_pooled = sqrt(p_pooled * (1-p_pooled))
+  se_pooled = sd_pooled * sqrt(1/size_control + 1/size_treatment)
+  z_score = (p_treatment - p_control) / se_pooled
+  return(z_score)
+}
+
+get_p_value = function(size_control, size_treatment, successes_control, successes_treatment, side=0){
+  z_score = pooled_two_proportions_zscore(size_control, size_treatment, successes_control, successes_treatment)
+  return(p_value(z_score, side))
+}
+```
+
+
+#### Size of unique users per variant
+
+```{r}
+df_ab %>% distinct(cookie, .keep_all = TRUE) %>% select(variant) %>% 
+  group_by(variant) %>%
+  summarise(Size = length(variant))
+```
+
+
+#### Number of views by variant
+
+```{r}
+Views = df_ab %>% distinct(cookie, .keep_all = TRUE) %>% select(variant, numViews) %>% 
+  group_by(variant) %>% summarise(Views = sum(numViews))
+Views
+```
+
+
+#### Number of leads by variant
+
+```{r}
+Leads = df_ab %>% distinct(cookie, .keep_all = TRUE) %>% select(variant, numLeads) %>% 
+  group_by(variant) %>% summarise(Leads = sum(numLeads))
+Leads
+```
+
+#### Conversion Rate by variant
+
+```{r}
+df_ab %>% distinct(cookie, .keep_all = TRUE) %>% select(variant, numLeads, numViews) %>% 
+  mutate(ConvRate = ifelse(numViews>0, numLeads/numViews, 0)) %>%
+  group_by(variant) %>% 
+  summarise(CR = mean(ConvRate))
+```
+
+#### Daily number of Leads by Variant
+
+```{r}
+(DL = df_ab %>% 
+  distinct(cookie, .keep_all = TRUE) %>% 
+  select(date,numLeads,variant) %>%
+  group_by(date, variant) %>% 
+  summarise(Leads = sum(numLeads)))
+```
+
+```{r}
+ggplot(DL, aes(x=date, y=Leads, group=variant)) +
+  geom_line(aes(linetype=variant, color=variant))+
+  geom_point(aes(color=variant))+
+  labs(title = "Leads evolution by variant") +
+  theme_light()
+```
+
+#### Daily conversion rate by variant
+
+```{r}
+(CR_d = df_ab %>% 
+  distinct(cookie, .keep_all = TRUE) %>% 
+  mutate(CR = ifelse(numViews>0, numLeads/numViews, 0)) %>%
+  select(date,CR,variant) %>%
+  group_by(date, variant) %>% 
+  summarise(ConvRate = mean(CR)))
+```
+
+```{r}
+ggplot(CR_d, aes(x=date, y=ConvRate, group=variant)) +
+  geom_line(aes(linetype=variant, color=variant))+
+  geom_point(aes(color=variant))+
+  labs(title = "CR evolution by variant") +
+  theme_light()
+```
+
+
+### Hypothesis testing
+
+As null hypothesis successes_control <= successes_treatment, then:
+$$
+side=-1
+$$ 
+
+```{r}
+get_p_value(size_control = as.numeric(Views[Views$variant == "A",2]), 
+            size_treatment =  as.numeric(Views[Views$variant == "B",2]), 
+            successes_control = as.numeric(Leads[Leads$variant == "A",2]), 
+            successes_treatment = as.numeric(Leads[Leads$variant == "B",2]), 
+            side = -1)
+```
+
+As the p-value is lower than the level of significance $\alpha = 0.05$, then the null hypothesis, which states that `successes_control <= successes_treatment` is rejected. Therefore, we can conclude that we have enough evidence to say that the treatment group does not have a statistically significant higher successes numbers. 
+
+Moreover, the AB test has shown us that adding buyer's ratings to a product page has not increase the leads in a statistically significant way. 
+
+
+
+
+
+
